@@ -6,6 +6,12 @@ from datetime import datetime
 import re
 import plotly.graph_objects as go
 
+VIDEO_DIR = "videos"
+os.makedirs(VIDEO_DIR, exist_ok=True)
+
+
+
+
 COLOR_MAP = {
     "TE": "#1f77b4",  # blue
     "FK": "#ff7f0e",  # orange
@@ -104,16 +110,40 @@ with tab1:
         team = st.text_input("Team")
         session_name = st.text_input("Session Name")
         session_date = st.date_input("Session Date")
-        youtube_link = st.text_input("YouTube Link")
+        video_option = st.radio("Video Source", ["YouTube Link", "Upload Video File"])
         notes = st.text_area("Notes")
+
+        youtube_link = ""
+        video_path = ""
+
+        if video_option == "YouTube Link":
+            youtube_link = st.text_input("YouTube Link")
+        else:
+            uploaded_video = st.file_uploader("Upload Video File", type=["mp4", "mov", "avi"])
+            if uploaded_video:
+                video_filename = f"{name.replace(' ', '_')}_{session_name.replace(' ', '_')}.mp4"
+                video_path = os.path.join(VIDEO_DIR, video_filename)
+
         csv_file = st.file_uploader("Upload Kinovea CSV", type="csv")
         submitted = st.form_submit_button("Upload")
 
-        if submitted and csv_file:
-            csv_path = f"{DATA_DIR}/{name.replace(' ', '_')}_{session_name.replace(' ', '_')}.csv"
-            with open(csv_path, "wb") as f:
-                f.write(csv_file.read())
+        if submitted and (youtube_link or video_path):
+            # Save CSV if provided
+            csv_path = None
+            if csv_file:
+                csv_path = f"{DATA_DIR}/{name.replace(' ', '_')}_{session_name.replace(' ', '_')}.csv"
+                with open(csv_path, "wb") as f:
+                    f.write(csv_file.read())
 
+            # Save video file if needed
+            if video_option == "Upload Video File" and uploaded_video:
+                with open(video_path, "wb") as f:
+                    f.write(uploaded_video.read())
+
+            # Determine final video source
+            video_source = youtube_link if video_option == "YouTube Link" else video_path
+
+            # DB insert
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
 
@@ -127,16 +157,23 @@ with tab1:
                 c.execute("INSERT INTO players (name, team, notes) VALUES (?, ?, ?)", (name, team, ""))
                 player_id = int(c.lastrowid)
 
-            # Insert session
+            # Insert session (CSV path may be None)
             c.execute('''INSERT INTO sessions 
-                         (player_id, date, session_name, youtube_link, kinovea_csv, notes)
+                         (player_id, date, session_name, video_source, kinovea_csv, notes)
                          VALUES (?, ?, ?, ?, ?, ?)''',
-                      (player_id, str(session_date), session_name, youtube_link, csv_path, notes))
+                      (player_id, str(session_date), session_name, video_source, csv_path, notes))
             conn.commit()
             conn.close()
-            st.success(" Session uploaded!")
+            st.success("✅ Session uploaded!")
+
+        elif submitted:
+            st.warning("⚠️ Please upload a video (YouTube link or file).")
+
+        elif submitted:
+            st.warning("⚠️ Please upload both a CSV and a video or link.")
 
 # === TAB 2: View Sessions ===
+
 with tab2:
     st.header("View & Analyze Session")
 
@@ -158,17 +195,25 @@ with tab2:
         if not session_match.empty:
             session_row = session_match.iloc[0]
 
-            st.subheader(" Video Playback")
-            video_id = extract_youtube_id(session_row.youtube_link)
-            if video_id:
-                st.video(f"https://www.youtube.com/embed/{video_id}")
-            else:
-                st.warning("⚠️ Could not extract video ID. Check the YouTube link.")
+            st.subheader("Video Playback")
+            video_source = session_row["video_source"]
 
-            st.subheader(" Kinematic Data")
-            csv_path = session_row.kinovea_csv
-            if not os.path.exists(csv_path):
-                st.warning("⚠️ The CSV file for this session no longer exists.")
+            if video_source.startswith("http"):
+                video_id = extract_youtube_id(video_source)
+                if video_id:
+                    st.video(f"https://www.youtube.com/embed/{video_id}")
+                else:
+                    st.warning("⚠️ Could not extract video ID. Check the YouTube link.")
+            else:
+                if os.path.exists(video_source):
+                    st.video(video_source)
+                else:
+                    st.warning("⚠️ Local video file not found.")
+
+            st.subheader("Kinematic Data")
+            csv_path = session_row["kinovea_csv"]
+            if not csv_path or not os.path.exists(csv_path):
+                st.info("No Kinovea data uploaded for this session.")
             else:
                 try:
                     kin_df = pd.read_csv(csv_path)
@@ -214,30 +259,40 @@ with tab3:
             left_match = left_sessions[left_sessions["label"] == session_left]
             if not left_match.empty:
                 left_row = left_match.iloc[0]
-                video_id = extract_youtube_id(left_row.youtube_link)
-                if video_id:
-                    st.video(f"https://www.youtube.com/embed/{video_id}")
-                else:
-                    st.warning("⚠️ Invalid YouTube link for left session.")
+                video_source = left_row["video_source"]
 
-                try:
-                    df_left = pd.read_csv(left_row.kinovea_csv)
-
-                    if "Time (ms)" in df_left.columns:
-                        available_metrics_left = [col for col in df_left.columns if col in COLOR_MAP]
-                        selected_left_metrics = st.multiselect(
-                            "Select metrics to show (Left)",
-                            options=available_metrics_left,
-                            default=available_metrics_left,
-                            key="metric_select_left"
-                        )
-                        plot_custom_lines(df_left, chart_key="left_plot", selected_metrics=selected_left_metrics)
+                if video_source.startswith("http"):
+                    video_id = extract_youtube_id(video_source)
+                    if video_id:
+                        st.video(f"https://www.youtube.com/embed/{video_id}")
                     else:
-                        st.warning("Column 'Time (ms)' not found in left session.")
-                        st.line_chart(df_left.select_dtypes(include=['float', 'int']))
+                        st.warning("⚠️ Invalid YouTube link for left session.")
+                else:
+                    if os.path.exists(video_source):
+                        st.video(video_source)
+                    else:
+                        st.warning("⚠️ Local video file not found for left session.")
 
-                except Exception as e:
-                    st.error(f"Error reading left CSV: {e}")
+                csv_path_left = left_row.kinovea_csv
+                if not csv_path_left or not os.path.exists(csv_path_left):
+                    st.info("No Kinovea data uploaded for this session.")
+                else:
+                    try:
+                        df_left = pd.read_csv(csv_path_left)
+                        if "Time (ms)" in df_left.columns:
+                            available_metrics_left = [col for col in df_left.columns if col in COLOR_MAP]
+                            selected_left_metrics = st.multiselect(
+                                "Select metrics to show (Left)",
+                                options=available_metrics_left,
+                                default=available_metrics_left,
+                                key="metric_select_left"
+                            )
+                            plot_custom_lines(df_left, chart_key="left_plot", selected_metrics=selected_left_metrics)
+                        else:
+                            st.warning("Column 'Time (ms)' not found in left session.")
+                            st.line_chart(df_left.select_dtypes(include=['float', 'int']))
+                    except Exception as e:
+                        st.error(f"Error reading left CSV: {e}")
 
     # === RIGHT SESSION ===
     with col2:
@@ -254,30 +309,42 @@ with tab3:
             right_match = right_sessions[right_sessions["label"] == session_right]
             if not right_match.empty:
                 right_row = right_match.iloc[0]
-                video_id = extract_youtube_id(right_row.youtube_link)
-                if video_id:
-                    st.video(f"https://www.youtube.com/embed/{video_id}")
-                else:
-                    st.warning("⚠️ Invalid YouTube link for right session.")
+                video_source = right_row["video_source"]
 
-                try:
-                    df_right = pd.read_csv(right_row.kinovea_csv)
-
-                    if "Time (ms)" in df_right.columns:
-                        available_metrics_right = [col for col in df_right.columns if col in COLOR_MAP]
-                        selected_right_metrics = st.multiselect(
-                            "Select metrics to show (Right)",
-                            options=available_metrics_right,
-                            default=available_metrics_right,
-                            key="metric_select_right"
-                        )
-                        plot_custom_lines(df_right, chart_key="right_plot", selected_metrics=selected_right_metrics)
+                if video_source.startswith("http"):
+                    video_id = extract_youtube_id(video_source)
+                    if video_id:
+                        st.video(f"https://www.youtube.com/embed/{video_id}")
                     else:
-                        st.warning("Column 'Time (ms)' not found in right session.")
-                        st.line_chart(df_right.select_dtypes(include=['float', 'int']))
+                        st.warning("⚠️ Invalid YouTube link for right session.")
+                else:
+                    if os.path.exists(video_source):
+                        st.video(video_source)
+                    else:
+                        st.warning("⚠️ Local video file not found for right session.")
 
-                except Exception as e:
-                    st.error(f"Error reading right CSV: {e}")
+                csv_path_right = right_row.kinovea_csv
+                if not csv_path_right or not os.path.exists(csv_path_right):
+                    st.info("No Kinovea data uploaded for this session.")
+                else:
+                    try:
+                        df_right = pd.read_csv(csv_path_right)
+                        if "Time (ms)" in df_right.columns:
+                            available_metrics_right = [col for col in df_right.columns if col in COLOR_MAP]
+                            selected_right_metrics = st.multiselect(
+                                "Select metrics to show (Right)",
+                                options=available_metrics_right,
+                                default=available_metrics_right,
+                                key="metric_select_right"
+                            )
+                            plot_custom_lines(df_right, chart_key="right_plot", selected_metrics=selected_right_metrics)
+                        else:
+                            st.warning("Column 'Time (ms)' not found in right session.")
+                            st.line_chart(df_right.select_dtypes(include=['float', 'int']))
+                    except Exception as e:
+                        st.error(f"Error reading right CSV: {e}")
+
+
 
 
 # === Debug: Show raw tables ===
