@@ -2,3 +2,8 @@ streamlit
 pandas
 matplotlib
 plotly
+supabase
+python-dotenv
+os
+io
+requests
