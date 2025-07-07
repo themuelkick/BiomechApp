@@ -47,3 +47,4 @@ def auth_screen():
             st.session_state.user_email = user.user.email
             st.success(f"Welcome back, {email}")
             st.rerun()
+
